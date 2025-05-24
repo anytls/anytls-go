@@ -19,6 +19,7 @@ var passwordSha256 []byte
 func main() {
 	listen := flag.String("l", "127.0.0.1:1080", "socks5 listen port")
 	serverAddr := flag.String("s", "127.0.0.1:8443", "server address")
+	socksUserPass := flag.String("sup", "", "socks5 server user,password(example:-sup admin,admin)")
 	sni := flag.String("sni", "", "SNI")
 	password := flag.String("p", "", "password")
 	flag.Parse()
@@ -75,6 +76,6 @@ func main() {
 		if err != nil {
 			logrus.Fatalln("accept:", err)
 		}
-		go handleTcpConnection(ctx, c, client)
+		go handleTcpConnection(ctx, c, client,socksUserPass)
 	}
 }
