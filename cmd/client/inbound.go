@@ -4,7 +4,9 @@ import (
 	"context"
 	"net"
 	"runtime/debug"
+	"strings"
 
+	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/network"
@@ -13,18 +15,34 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func handleTcpConnection(ctx context.Context, c net.Conn, s *myClient) {
-	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorln("[BUG]", r, string(debug.Stack()))
-		}
-	}()
-	defer c.Close()
+func handleTcpConnection(ctx context.Context, c net.Conn, s *myClient, socksUserPass *string) {
+	if *socksUserPass != "" && strings.Contains(*socksUserPass, ",") {
+		var users []auth.User
+		users = append(users, auth.User{Username: strings.Split(*socksUserPass, ",")[0], Password: strings.Split(*socksUserPass, ",")[1]})
+		authenticator := auth.NewAuthenticator(users)
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorln("[BUG]", r, string(debug.Stack()))
+			}
+		}()
+		defer c.Close()
 
-	socks.HandleConnection(ctx, c, nil, s, M.Metadata{
-		Source:      M.SocksaddrFromNet(c.RemoteAddr()),
-		Destination: M.SocksaddrFromNet(c.LocalAddr()),
-	})
+		socks.HandleConnection(ctx, c, authenticator, s, M.Metadata{
+			Source:      M.SocksaddrFromNet(c.RemoteAddr()),
+			Destination: M.SocksaddrFromNet(c.LocalAddr()),
+		})
+	} else {
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorln("[BUG]", r, string(debug.Stack()))
+			}
+		}()
+		defer c.Close()
+		socks.HandleConnection(ctx, c, nil, s, M.Metadata{
+			Source:      M.SocksaddrFromNet(c.RemoteAddr()),
+			Destination: M.SocksaddrFromNet(c.LocalAddr()),
+		})
+	}
 }
 
 // sing socks inbound
