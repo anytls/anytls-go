@@ -21,6 +21,11 @@ func main() {
 	listen := flag.String("l", "0.0.0.0:8443", "server listen port")
 	password := flag.String("p", "", "password")
 	paddingScheme := flag.String("padding-scheme", "", "padding-scheme")
+	// ADDED: New flags for certificate and fallback
+	certFile := flag.String("cert", "", "TLS certificate file (PEM format)")
+	keyFile := flag.String("key", "", "TLS private key file (PEM format)")
+	fallbackAddr := flag.String("fallback", "", "Fallback server address on auth failure, e.g., 127.0.0.1:80")
+
 	flag.Parse()
 
 	if *password == "" {
@@ -54,21 +59,40 @@ func main() {
 
 	logrus.Infoln("[Server]", util.ProgramVersionName)
 	logrus.Infoln("[Server] Listening TCP", *listen)
+	if *fallbackAddr != "" {
+		logrus.Infoln("[Server] Fallback enabled, target:", *fallbackAddr)
+	}
 
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		logrus.Fatalln("listen server tcp:", err)
 	}
 
-	tlsCert, _ := util.GenerateKeyPair(time.Now, "")
+	// MODIFIED: Load certificate from file or generate self-signed
+	var tlsCert *tls.Certificate
+	if *certFile != "" && *keyFile != "" {
+		logrus.Infoln("[Server] Loading TLS certificate from", *certFile, "and", *keyFile)
+		cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
+		if err != nil {
+			logrus.Fatalln("Failed to load TLS key pair:", err)
+		}
+		tlsCert = &cert
+	} else {
+		logrus.Warnln("[Server] No certificate provided, generating a self-signed certificate.")
+		cert, err := util.GenerateKeyPair(time.Now, "")
+		if err != nil {
+			logrus.Fatalln("Failed to generate self-signed certificate:", err)
+		}
+		tlsCert = cert
+	}
+
 	tlsConfig := &tls.Config{
-		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return tlsCert, nil
-		},
+		Certificates: []tls.Certificate{*tlsCert},
 	}
 
 	ctx := context.Background()
-	server := NewMyServer(tlsConfig)
+	// MODIFIED: Pass fallback address to the server instance
+	server := NewMyServer(tlsConfig, *fallbackAddr)
 
 	for {
 		c, err := listener.Accept()
