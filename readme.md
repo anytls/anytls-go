@@ -12,15 +12,20 @@
 
 [URI 格式](./docs/uri_scheme.md)
 
-## 快速食用方法
+## 不怎么快速的快速食用方法
 
 ### 服务器
 
 ```
-./anytls-server -l 0.0.0.0:8443 -p 密码
+./server \
+  -l 0.0.0.0:5543 \
+  -p "你的强壮密码" \
+  -cert "/etc/letsencrypt/live/你的域名/fullchain.pem" \
+  -key "/etc/letsencrypt/live/你的域名/privkey.pem" \
+  -fallback 回落地址
 ```
 
-`0.0.0.0:8443` 为服务器监听的地址和端口。
+支持证书和回落。
 
 ### 客户端
 
