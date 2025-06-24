@@ -3,68 +3,35 @@ package session
 import (
 	"anytls/proxy/padding"
 	"anytls/util"
-	"crypto/md5"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"runtime/debug"
-	"slices"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/sagernet/sing/common/atomic"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sirupsen/logrus"
 )
 
-var clientDebugPaddingScheme = os.Getenv("CLIENT_DEBUG_PADDING_SCHEME") == "1"
-
 type Session struct {
 	conn     net.Conn
 	connLock sync.Mutex
 
 	streams    map[uint32]*Stream
-	streamId   atomic.Uint32
 	streamLock sync.RWMutex
 
 	dieOnce sync.Once
 	die     chan struct{}
 	dieHook func()
 
-	synDone     func()
-	synDoneLock sync.Mutex
-
-	// pool
-	seq       uint64
-	idleSince time.Time
-	padding   *atomic.TypedValue[*padding.PaddingFactory]
+	padding *atomic.TypedValue[*padding.PaddingFactory]
 
 	peerVersion byte
 
-	// client
-	isClient    bool
-	sendPadding bool
-	buffering   bool
-	buffer      []byte
-	pktCounter  atomic.Uint32
-
-	// server
 	onNewStream func(stream *Stream)
-}
-
-func NewClientSession(conn net.Conn, _padding *atomic.TypedValue[*padding.PaddingFactory]) *Session {
-	s := &Session{
-		conn:        conn,
-		isClient:    true,
-		sendPadding: true,
-		padding:     _padding,
-	}
-	s.die = make(chan struct{})
-	s.streams = make(map[uint32]*Stream)
-	return s
 }
 
 func NewServerSession(conn net.Conn, onNewStream func(stream *Stream), _padding *atomic.TypedValue[*padding.PaddingFactory]) *Session {
@@ -79,22 +46,7 @@ func NewServerSession(conn net.Conn, onNewStream func(stream *Stream), _padding 
 }
 
 func (s *Session) Run() {
-	if !s.isClient {
-		s.recvLoop()
-		return
-	}
-
-	settings := util.StringMap{
-		"v":           "2",
-		"client":      util.ProgramVersionName,
-		"padding-md5": s.padding.Load().Md5,
-	}
-	f := newFrame(cmdSettings, 0)
-	f.data = settings.ToBytes()
-	s.buffering = true
-	s.writeFrame(f)
-
-	go s.recvLoop()
+	s.recvLoop()
 }
 
 // IsClosed does a safe check to see if we have shutdown
@@ -128,45 +80,6 @@ func (s *Session) Close() error {
 		return s.conn.Close()
 	} else {
 		return io.ErrClosedPipe
-	}
-}
-
-// OpenStream is used to create a new stream for CLIENT
-func (s *Session) OpenStream() (*Stream, error) {
-	if s.IsClosed() {
-		return nil, io.ErrClosedPipe
-	}
-
-	sid := s.streamId.Add(1)
-	stream := newStream(sid, s)
-
-	//logrus.Debugln("stream open", sid, s.streams)
-
-	if sid >= 2 && s.peerVersion >= 2 {
-		s.synDoneLock.Lock()
-		if s.synDone != nil {
-			s.synDone()
-		}
-		s.synDone = util.NewDeadlineWatcher(time.Second*3, func() {
-			s.Close()
-		})
-		s.synDoneLock.Unlock()
-	}
-
-	if _, err := s.writeFrame(newFrame(cmdSYN, sid)); err != nil {
-		return nil, err
-	}
-
-	s.buffering = false // proxy Write it's SocksAddr to flush the buffer
-
-	s.streamLock.Lock()
-	defer s.streamLock.Unlock()
-	select {
-	case <-s.die:
-		return nil, io.ErrClosedPipe
-	default:
-		s.streams[sid] = stream
-		return stream, nil
 	}
 }
 
@@ -205,8 +118,8 @@ func (s *Session) recvLoop() error {
 						return err
 					}
 				}
-			case cmdSYN: // should be server only
-				if !s.isClient && !receivedSettingsFromClient {
+			case cmdSYN:
+				if !receivedSettingsFromClient {
 					f := newFrame(cmdAlert, 0)
 					f.data = []byte("client did not send its settings")
 					s.writeFrame(f)
@@ -225,28 +138,6 @@ func (s *Session) recvLoop() error {
 					}()
 				}
 				s.streamLock.Unlock()
-			case cmdSYNACK: // should be client only
-				s.synDoneLock.Lock()
-				if s.synDone != nil {
-					s.synDone()
-					s.synDone = nil
-				}
-				s.synDoneLock.Unlock()
-				if hdr.Length() > 0 {
-					buffer := buf.Get(int(hdr.Length()))
-					if _, err := io.ReadFull(s.conn, buffer); err != nil {
-						buf.Put(buffer)
-						return err
-					}
-					// report error
-					s.streamLock.RLock()
-					stream, ok := s.streams[sid]
-					s.streamLock.RUnlock()
-					if ok {
-						stream.CloseWithError(fmt.Errorf("remote: %s", string(buffer)))
-					}
-					buf.Put(buffer)
-				}
 			case cmdFIN:
 				s.streamLock.RLock()
 				stream, ok := s.streams[sid]
@@ -254,7 +145,6 @@ func (s *Session) recvLoop() error {
 				if ok {
 					stream.Close()
 				}
-				//logrus.Debugln("stream fin", sid, s.streams)
 			case cmdWaste:
 				if hdr.Length() > 0 {
 					buffer := buf.Get(int(hdr.Length()))
@@ -271,90 +161,50 @@ func (s *Session) recvLoop() error {
 						buf.Put(buffer)
 						return err
 					}
-					if !s.isClient {
-						receivedSettingsFromClient = true
-						m := util.StringMapFromBytes(buffer)
-						paddingF := s.padding.Load()
-						if m["padding-md5"] != paddingF.Md5 {
-							// logrus.Debugln("remote md5 is", m["padding-md5"])
-							f := newFrame(cmdUpdatePaddingScheme, 0)
-							f.data = paddingF.RawScheme
-							_, err = s.writeFrame(f)
-							if err != nil {
-								buf.Put(buffer)
-								return err
-							}
+
+					receivedSettingsFromClient = true
+					m := util.StringMapFromBytes(buffer)
+					paddingF := s.padding.Load()
+					if m["padding-md5"] != paddingF.Md5 {
+						f := newFrame(cmdUpdatePaddingScheme, 0)
+						f.data = paddingF.RawScheme
+						_, err = s.writeFrame(f)
+						if err != nil {
+							buf.Put(buffer)
+							return err
 						}
-						// check client's version
-						if v, err := strconv.Atoi(m["v"]); err == nil && v >= 2 {
-							s.peerVersion = byte(v)
-							// send cmdServerSettings
-							f := newFrame(cmdServerSettings, 0)
-							f.data = util.StringMap{
-								"v": "2",
-							}.ToBytes()
-							_, err = s.writeFrame(f)
-							if err != nil {
-								buf.Put(buffer)
-								return err
-							}
+					}
+					// check client's version
+					if v, err := strconv.Atoi(m["v"]); err == nil && v >= 2 {
+						s.peerVersion = byte(v)
+						// send cmdServerSettings
+						f := newFrame(cmdServerSettings, 0)
+						f.data = util.StringMap{
+							"v": "2",
+						}.ToBytes()
+						_, err = s.writeFrame(f)
+						if err != nil {
+							buf.Put(buffer)
+							return err
 						}
 					}
 					buf.Put(buffer)
-				}
-			case cmdAlert:
-				if hdr.Length() > 0 {
-					buffer := buf.Get(int(hdr.Length()))
-					if _, err := io.ReadFull(s.conn, buffer); err != nil {
-						buf.Put(buffer)
-						return err
-					}
-					if s.isClient {
-						logrus.Errorln("[Alert from server]", string(buffer))
-					}
-					buf.Put(buffer)
-					return nil
-				}
-			case cmdUpdatePaddingScheme:
-				if hdr.Length() > 0 {
-					// `rawScheme` Do not use buffer to prevent subsequent misuse
-					rawScheme := make([]byte, int(hdr.Length()))
-					if _, err := io.ReadFull(s.conn, rawScheme); err != nil {
-						return err
-					}
-					if s.isClient && !clientDebugPaddingScheme {
-						if padding.UpdatePaddingScheme(rawScheme) {
-							logrus.Infof("[Update padding succeed] %x\n", md5.Sum(rawScheme))
-						} else {
-							logrus.Warnf("[Update padding failed] %x\n", md5.Sum(rawScheme))
-						}
-					}
 				}
 			case cmdHeartRequest:
 				if _, err := s.writeFrame(newFrame(cmdHeartResponse, sid)); err != nil {
 					return err
 				}
-			case cmdHeartResponse:
-				// Active keepalive checking is not implemented yet
-				break
-			case cmdServerSettings:
+			// Commands only client should receive, but we ignore them just in case.
+			case cmdSYNACK, cmdAlert, cmdUpdatePaddingScheme, cmdHeartResponse, cmdServerSettings:
 				if hdr.Length() > 0 {
-					buffer := buf.Get(int(hdr.Length()))
-					if _, err := io.ReadFull(s.conn, buffer); err != nil {
-						buf.Put(buffer)
+					// We must consume the data to keep the stream synchronized
+					if _, err := io.CopyN(io.Discard, s.conn, int64(hdr.Length())); err != nil {
 						return err
 					}
-					if s.isClient {
-						// check server's version
-						m := util.StringMapFromBytes(buffer)
-						if v, err := strconv.Atoi(m["v"]); err == nil {
-							s.peerVersion = byte(v)
-						}
-					}
-					buf.Put(buffer)
 				}
 			default:
-				// I don't know what command it is (can't have data)
+				// Unknown command, close connection to prevent desync
+				return fmt.Errorf("unknown command: %d", hdr.Cmd())
 			}
 		} else {
 			return err
@@ -394,75 +244,13 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 	s.connLock.Lock()
 	defer s.connLock.Unlock()
 
-	if s.buffering {
-		s.buffer = slices.Concat(s.buffer, b)
-		return len(b), nil
-	} else if len(s.buffer) > 0 {
-		b = slices.Concat(s.buffer, b)
-		s.buffer = nil
+	// Server does not use client-side buffering/padding logic, just writes directly.
+	// The protocol doc does not specify padding for server-to-client traffic,
+	// but if it were needed, the logic would be here. For now, we keep it simple.
+	// If padding for downstream is desired, one would need a similar pktCounter and logic as the client-side had.
+	// This simplified implementation assumes padding is a client-to-server concern.
+	if len(b) > 0 {
+		return s.conn.Write(b)
 	}
-
-	// calulate & send padding
-	if s.sendPadding {
-		pkt := s.pktCounter.Add(1)
-		paddingF := s.padding.Load()
-		if pkt < paddingF.Stop {
-			pktSizes := paddingF.GenerateRecordPayloadSizes(pkt)
-			for _, l := range pktSizes {
-				remainPayloadLen := len(b)
-				if l == padding.CheckMark {
-					if remainPayloadLen == 0 {
-						break
-					} else {
-						continue
-					}
-				}
-				// logrus.Debugln(pkt, "write", l, "len", remainPayloadLen, "remain", remainPayloadLen-l)
-				if remainPayloadLen > l { // this packet is all payload
-					_, err = s.conn.Write(b[:l])
-					if err != nil {
-						return 0, err
-					}
-					n += l
-					b = b[l:]
-				} else if remainPayloadLen > 0 { // this packet contains padding and the last part of payload
-					paddingLen := l - remainPayloadLen - headerOverHeadSize
-					if paddingLen > 0 {
-						padding := make([]byte, headerOverHeadSize+paddingLen)
-						padding[0] = cmdWaste
-						binary.BigEndian.PutUint32(padding[1:5], 0)
-						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
-						b = slices.Concat(b, padding)
-					}
-					_, err = s.conn.Write(b)
-					if err != nil {
-						return 0, err
-					}
-					n += remainPayloadLen
-					b = nil
-				} else { // this packet is all padding
-					padding := make([]byte, headerOverHeadSize+l)
-					padding[0] = cmdWaste
-					binary.BigEndian.PutUint32(padding[1:5], 0)
-					binary.BigEndian.PutUint16(padding[5:7], uint16(l))
-					_, err = s.conn.Write(padding)
-					if err != nil {
-						return 0, err
-					}
-					b = nil
-				}
-			}
-			// maybe still remain payload to write
-			if len(b) == 0 {
-				return
-			} else {
-				n2, err := s.conn.Write(b)
-				return n + n2, err
-			}
-		} else {
-			s.sendPadding = false
-		}
-	}
-
-	return s.conn.Write(b)
+	return 0, nil
 }
