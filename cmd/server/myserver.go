@@ -5,15 +5,15 @@ import (
 )
 
 type myServer struct {
-	tlsConfig    *tls.Config
-	fallbackAddr string // ADDED: Field to store the fallback address
+	tlsConfig   *tls.Config
+	fallbackCfg FallbackConfig // MODIFIED: Store the whole fallback config struct
 }
 
-// MODIFIED: NewMyServer now accepts a fallback address
-func NewMyServer(tlsConfig *tls.Config, fallbackAddr string) *myServer {
+// MODIFIED: NewMyServer now accepts a FallbackConfig struct
+func NewMyServer(tlsConfig *tls.Config, fallbackCfg FallbackConfig) *myServer {
 	s := &myServer{
-		tlsConfig:    tlsConfig,
-		fallbackAddr: fallbackAddr,
+		tlsConfig:   tlsConfig,
+		fallbackCfg: fallbackCfg,
 	}
 	return s
 }

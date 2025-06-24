@@ -20,61 +20,59 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// handleTcpConnection 处理一个已经建立的TLS连接。
 func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	defer func() {
 		if r := recover(); r != nil {
 			logrus.Errorln("[BUG]", r, string(debug.Stack()))
 		}
 	}()
-
-	c = tls.Server(c, s.tlsConfig)
 	defer c.Close()
-
-	// Perform TLS handshake explicitly to handle handshake errors
-	if tlsConn, ok := c.(*tls.Conn); ok {
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			logrus.Debugln("TLS handshake error:", err, "from", c.RemoteAddr())
-			return
-		}
-	}
 
 	b := buf.NewPacket()
 	defer b.Release()
 
-	// Set a read deadline for the initial authentication packet
+	// 为初始认证包设置读取超时
 	c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	n, err := b.ReadOnceFrom(c)
-	c.SetReadDeadline(time.Time{}) // Clear the deadline
+	c.SetReadDeadline(time.Time{}) // 清除超时
 	if err != nil {
 		logrus.Debugln("ReadOnceFrom:", err, "from", c.RemoteAddr())
-		fallback(ctx, c, s.fallbackAddr)
+		// MODIFIED: Pass the fallback config struct
+		fallback(ctx, c, s.fallbackCfg)
 		return
 	}
 	cachedConn := bufio.NewCachedConn(c, b)
 
+	// 验证密码
 	by, err := b.ReadBytes(32)
 	if err != nil || !bytes.Equal(by, passwordSha256) {
 		b.Resize(0, n)
-		fallback(ctx, cachedConn, s.fallbackAddr)
+		// MODIFIED: Pass the fallback config struct
+		fallback(ctx, cachedConn, s.fallbackCfg)
 		return
 	}
+	// 读取并处理填充
 	by, err = b.ReadBytes(2)
 	if err != nil {
 		b.Resize(0, n)
-		fallback(ctx, cachedConn, s.fallbackAddr)
+		// MODIFIED: Pass the fallback config struct
+		fallback(ctx, cachedConn, s.fallbackCfg)
 		return
 	}
 	paddingLen := binary.BigEndian.Uint16(by)
 	if paddingLen > 0 {
 		if _, err = b.ReadBytes(int(paddingLen)); err != nil {
 			b.Resize(0, n)
-			fallback(ctx, cachedConn, s.fallbackAddr)
+			// MODIFIED: Pass the fallback config struct
+			fallback(ctx, cachedConn, s.fallbackCfg)
 			return
 		}
 	}
 
 	logrus.Infoln("Client authenticated:", c.RemoteAddr())
 
+	// 认证成功，创建会话
 	session := session.NewServerSession(cachedConn, func(stream *session.Stream) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -99,45 +97,41 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	session.Close()
 }
 
-// MODIFIED: The fallback function now supports dialing TLS for HTTPS backends.
-func fallback(ctx context.Context, c net.Conn, fallbackAddr string) {
-	if fallbackAddr == "" {
+// MODIFIED: fallback now accepts a FallbackConfig struct.
+func fallback(ctx context.Context, c net.Conn, fallbackCfg FallbackConfig) {
+	if fallbackCfg.Address == "" {
 		logrus.Debugln("Authentication failed, no fallback configured. Closing connection from", c.RemoteAddr())
 		c.Close()
 		return
 	}
 
-	logrus.Debugln("Authentication failed, falling back to", fallbackAddr, "for", c.RemoteAddr())
+	logrus.Debugln("Authentication failed, falling back to", fallbackCfg.Address, "for", c.RemoteAddr())
 
-	// Dial the backend. We will decide whether to use TLS based on the port.
 	var backendConn net.Conn
 	var err error
 
-	host, port, err := net.SplitHostPort(fallbackAddr)
+	host, port, err := net.SplitHostPort(fallbackCfg.Address)
 	if err != nil {
-		logrus.Errorln("Invalid fallback address format:", fallbackAddr, err)
+		logrus.Errorln("Invalid fallback address format:", fallbackCfg.Address, err)
 		c.Close()
 		return
 	}
 
-	// Heuristic: if port is 443, assume HTTPS and dial with TLS.
-	// Otherwise, dial plain TCP.
 	if port == "443" {
 		logrus.Debugln("Fallback target port is 443, dialing with TLS.")
-		// For TLS dialing, we need a tls.Config.
-		// We can use a default one, but it's better to specify the ServerName for SNI.
 		tlsConfig := &tls.Config{
 			ServerName:         host,
-			InsecureSkipVerify: true, // Set to true if the backend uses a self-signed cert. For public sites, you might want this as false.
+			// MODIFIED: Use the value from the config file
+			InsecureSkipVerify: fallbackCfg.InsecureSkipVerify,
 		}
-		backendConn, err = tls.Dial("tcp", fallbackAddr, tlsConfig)
+		backendConn, err = tls.Dial("tcp", fallbackCfg.Address, tlsConfig)
 	} else {
 		logrus.Debugln("Fallback target port is not 443, dialing with plain TCP.")
-		backendConn, err = net.Dial("tcp", fallbackAddr)
+		backendConn, err = net.Dial("tcp", fallbackCfg.Address)
 	}
 
 	if err != nil {
-		logrus.Errorln("Failed to dial fallback address", fallbackAddr, ":", err)
+		logrus.Errorln("Failed to dial fallback address", fallbackCfg.Address, ":", err)
 		c.Close()
 		return
 	}
@@ -147,14 +141,14 @@ func fallback(ctx context.Context, c net.Conn, fallbackAddr string) {
 
 	go func() {
 		defer wg.Done()
-		defer backendConn.Close()
-		io.Copy(backendConn, c)
+		defer c.Close()
+		io.Copy(c, backendConn)
 	}()
 
 	go func() {
 		defer wg.Done()
-		defer c.Close()
-		io.Copy(c, backendConn)
+		defer backendConn.Close()
+		io.Copy(backendConn, c)
 	}()
 
 	wg.Wait()
