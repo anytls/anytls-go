@@ -15,6 +15,9 @@ func GenerateKeyPair(timeFunc func() time.Time, serverName string) (*tls.Certifi
 	if timeFunc == nil {
 		timeFunc = time.Now
 	}
+	if serverName == "" {
+		serverName = "anytls-go-server"
+	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
@@ -25,13 +28,14 @@ func GenerateKeyPair(timeFunc func() time.Time, serverName string) (*tls.Certifi
 	}
 	template := &x509.Certificate{
 		SerialNumber:          serialNumber,
-		NotBefore:             timeFunc().Add(time.Hour * -1),
-		NotAfter:              timeFunc().Add(time.Hour),
+		NotBefore:             timeFunc().Add(time.Hour * -24 * 365), // 1 year validity
+		NotAfter:              timeFunc().Add(time.Hour * 24 * 365),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		Subject: pkix.Name{
-			CommonName: serverName,
+			CommonName:   serverName,
+			Organization: []string{"AnyTLS-Go Self-Signed"},
 		},
 		DNSNames: []string{serverName},
 	}
