@@ -39,7 +39,7 @@ Fork新特性：
 2.  **克隆并编译本项目**:
     ```bash
     git clone https://github.com/BadCat114514/anytls-meow.git
-    cd anytls-go/cmd/server
+    cd anytls-meow/cmd/server
     go mod tidy
     go build
     ```
