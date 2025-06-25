@@ -7,55 +7,76 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/sagernet/sing/common/buf"
 )
 
 // Stream implements net.Conn
 type Stream struct {
-	id uint32
-
+	id   uint32
 	sess *Session
 
-	pipeR         *pipe.PipeReader
-	pipeW         *pipe.PipeWriter
-	writeDeadline pipe.PipeDeadline
+	pipeR *pipe.PipeReader
+	pipeW *pipe.PipeWriter
 
+	// Each stream has its own data channel to prevent head-of-line blocking.
+	dataCh chan []byte
+
+	// dieOnce protects the shutdown process of the stream.
 	dieOnce sync.Once
-	dieHook func()
 	dieErr  error
 
 	reportOnce sync.Once
 }
 
-// newStream initiates a Stream struct
+// newStream initiates a Stream struct and its dedicated data processing loop.
 func newStream(id uint32, sess *Session) *Stream {
-	s := new(Stream)
-	s.id = id
-	s.sess = sess
+	s := &Stream{
+		id:     id,
+		sess:   sess,
+		dataCh: make(chan []byte, 128), // Buffered channel for incoming data
+	}
 	s.pipeR, s.pipeW = pipe.Pipe()
-	s.writeDeadline = pipe.MakePipeDeadline()
+
+	// Start a dedicated goroutine for this stream to push data into its pipe.
+	// This decouples the session's read loop from the stream's consumer backpressure.
+	go s.pushDataLoop()
+
 	return s
+}
+
+// pushDataLoop reads from the data channel and writes to the internal pipe.
+// This loop terminates when the data channel is closed.
+func (s *Stream) pushDataLoop() {
+	// When the loop exits, ensure the write pipe is closed to unblock any readers.
+	defer s.pipeW.Close()
+
+	for data := range s.dataCh {
+		// This write can block if the application isn't reading from the stream.
+		_, err := s.pipeW.Write(data)
+		buf.Put(data) // Return the buffer to the pool after writing or on error.
+		if err != nil {
+			// The pipe was likely closed by the reader side.
+			// The stream is effectively dead, so we can exit.
+			return
+		}
+	}
 }
 
 // Read implements net.Conn
 func (s *Stream) Read(b []byte) (n int, err error) {
 	n, err = s.pipeR.Read(b)
-	if n == 0 && s.dieErr != nil {
-		err = s.dieErr
+	if err == io.EOF && s.dieErr != nil {
+		return n, s.dieErr
 	}
-	return
+	return n, err
 }
 
 // Write implements net.Conn
 func (s *Stream) Write(b []byte) (n int, err error) {
-	select {
-	case <-s.writeDeadline.Wait():
-		return 0, os.ErrDeadlineExceeded
-	default:
-	}
 	f := newFrame(cmdPSH, s.id)
 	f.data = b
-	n, err = s.sess.writeFrame(f)
-	return
+	return s.sess.writeFrame(f)
 }
 
 // Close implements net.Conn
@@ -67,23 +88,22 @@ func (s *Stream) CloseWithError(err error) error {
 	var once bool
 	s.dieOnce.Do(func() {
 		s.dieErr = err
-		s.pipeR.Close()
+		// Close the data channel to signal pushDataLoop to exit.
+		close(s.dataCh)
+		// Close the read side of the pipe, which will unblock any waiting Read calls.
+		s.pipeR.CloseWithError(err)
 		once = true
 	})
 
 	if once {
-		if s.dieHook != nil {
-			s.dieHook()
-			s.dieHook = nil
+		// MODIFIED (Deadlock Fix): Only notify the session if the session itself
+		// is not already in the process of closing.
+		if !s.sess.IsClosed() {
+			s.sess.streamClosed(s.id)
 		}
-		// CORRECTED: Call streamClosed without expecting a return value.
-		// The close operation is now asynchronous. Return nil to indicate
-		// the close operation was successfully initiated.
-		s.sess.streamClosed(s.id)
 		return nil
-	} else {
-		return s.dieErr
 	}
+	return s.dieErr
 }
 
 func (s *Stream) SetReadDeadline(t time.Time) error {
@@ -91,33 +111,22 @@ func (s *Stream) SetReadDeadline(t time.Time) error {
 }
 
 func (s *Stream) SetWriteDeadline(t time.Time) error {
-	s.writeDeadline.Set(t)
-	return nil
+	// Per-stream write deadline is not supported in this simple model.
+	return os.ErrInvalid
 }
 
 func (s *Stream) SetDeadline(t time.Time) error {
-	s.SetWriteDeadline(t)
 	return s.SetReadDeadline(t)
 }
 
 // LocalAddr satisfies net.Conn interface
 func (s *Stream) LocalAddr() net.Addr {
-	if ts, ok := s.sess.conn.(interface {
-		LocalAddr() net.Addr
-	}); ok {
-		return ts.LocalAddr()
-	}
-	return nil
+	return s.sess.conn.LocalAddr()
 }
 
 // RemoteAddr satisfies net.Conn interface
 func (s *Stream) RemoteAddr() net.Addr {
-	if ts, ok := s.sess.conn.(interface {
-		RemoteAddr() net.Addr
-	}); ok {
-		return ts.RemoteAddr()
-	}
-	return nil
+	return s.sess.conn.RemoteAddr()
 }
 
 // HandshakeFailure should be called when Server fail to create outbound proxy
