@@ -20,7 +20,11 @@ const ( // cmds
 )
 
 const (
-	headerOverHeadSize = 1 + 4 + 2
+	// FrameHeaderSize is the size of the frame header.
+	// 1 (cmd) + 4 (sid) + 2 (data length)
+	FrameHeaderSize = 7
+	// MaxFrameSize is the maximum size of a frame's data payload, based on uint16 length.
+	MaxFrameSize = 65535
 )
 
 // frame defines a packet from or to be multiplexed into a single connection
@@ -34,7 +38,7 @@ func newFrame(cmd byte, sid uint32) frame {
 	return frame{cmd: cmd, sid: sid}
 }
 
-type rawHeader [headerOverHeadSize]byte
+type rawHeader [FrameHeaderSize]byte
 
 func (h rawHeader) Cmd() byte {
 	return h[0]
