@@ -1,10 +1,11 @@
-# 一个AnyTLS-go的分支
+# 这是一个AnyTLS-go的叉子
 
 一个试图缓解 嵌套的TLS握手指纹(TLS in TLS) 问题的代理协议。`anytls-go` 是该协议的参考实现。
 
 - 灵活的分包和填充策略
 - 连接复用，降低代理延迟
 - 简洁的配置
+Fork新特性：
 - 支持ACME、证书文件
 - 支持Fallback
 - 移除客户端，请使用Mihomo,Singbox等代替
