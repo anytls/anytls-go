@@ -51,6 +51,8 @@ Fork新特性：
     sudo mkdir -p /usr/local/bin/anytls-server
     # 将编译好的二进制文件移动到安装目录
     sudo mv ./server /usr/local/bin/anytls-server/
+    # 设置权限
+    sudo chmod +x /usr/local/bin/anytls-server/server
     ```
 
 ### 3. 配置服务器
@@ -91,7 +93,7 @@ AnyTLS-Go 服务器由一个名为 `config.yaml` 的文件驱动。
           key_file: "/path/to/your/privkey.pem"
         ```
 
-    *   **模式 3：自签名 (用于测试)**
+    *   **模式 3：自签名**
         ```yaml
         tls:
           mode: "self-signed"
