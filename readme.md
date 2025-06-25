@@ -9,8 +9,9 @@
 Fork新特性：
 - 支持ACME、证书文件
 - 支持Fallback
-- 移除客户端，请使用Mihomo,Singbox等代替
+- 玄学优化
 - 支持systemctl管理服务
+- 移除客户端，请使用Mihomo,Singbox等代替
 
 [用户常见问题](./docs/faq.md)
 
