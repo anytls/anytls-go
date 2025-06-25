@@ -20,6 +20,23 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// MODIFIED: Create a buffer pool specifically for io.Copy operations in fallback.
+var copyBufPool = sync.Pool{
+	New: func() interface{} {
+		// Allocate a 32KB buffer, same as the default in io.Copy.
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
+
+// MODIFIED: A custom io.Copy implementation that uses a pooled buffer.
+func pooledCopy(dst io.Writer, src io.Reader) (written int64, err error) {
+	bufPtr := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufPtr)
+
+	return io.CopyBuffer(dst, src, *bufPtr)
+}
+
 // handleTcpConnection 处理一个已经建立的TLS连接。
 func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	defer func() {
@@ -38,7 +55,6 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	c.SetReadDeadline(time.Time{}) // 清除超时
 	if err != nil {
 		logrus.Debugln("ReadOnceFrom:", err, "from", c.RemoteAddr())
-		// MODIFIED: Pass the fallback config struct
 		fallback(ctx, c, s.fallbackCfg)
 		return
 	}
@@ -48,7 +64,6 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	by, err := b.ReadBytes(32)
 	if err != nil || !bytes.Equal(by, passwordSha256) {
 		b.Resize(0, n)
-		// MODIFIED: Pass the fallback config struct
 		fallback(ctx, cachedConn, s.fallbackCfg)
 		return
 	}
@@ -56,7 +71,6 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	by, err = b.ReadBytes(2)
 	if err != nil {
 		b.Resize(0, n)
-		// MODIFIED: Pass the fallback config struct
 		fallback(ctx, cachedConn, s.fallbackCfg)
 		return
 	}
@@ -64,7 +78,6 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	if paddingLen > 0 {
 		if _, err = b.ReadBytes(int(paddingLen)); err != nil {
 			b.Resize(0, n)
-			// MODIFIED: Pass the fallback config struct
 			fallback(ctx, cachedConn, s.fallbackCfg)
 			return
 		}
@@ -73,6 +86,7 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	logrus.Infoln("Client authenticated:", c.RemoteAddr())
 
 	// 认证成功，创建会话
+	// MODIFIED: The session now handles its own read/write loops internally.
 	session := session.NewServerSession(cachedConn, func(stream *session.Stream) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -97,7 +111,6 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	session.Close()
 }
 
-// MODIFIED: fallback now accepts a FallbackConfig struct.
 func fallback(ctx context.Context, c net.Conn, fallbackCfg FallbackConfig) {
 	if fallbackCfg.Address == "" {
 		logrus.Debugln("Authentication failed, no fallback configured. Closing connection from", c.RemoteAddr())
@@ -121,7 +134,6 @@ func fallback(ctx context.Context, c net.Conn, fallbackCfg FallbackConfig) {
 		logrus.Debugln("Fallback target port is 443, dialing with TLS.")
 		tlsConfig := &tls.Config{
 			ServerName:         host,
-			// MODIFIED: Use the value from the config file
 			InsecureSkipVerify: fallbackCfg.InsecureSkipVerify,
 		}
 		backendConn, err = tls.Dial("tcp", fallbackCfg.Address, tlsConfig)
@@ -141,14 +153,16 @@ func fallback(ctx context.Context, c net.Conn, fallbackCfg FallbackConfig) {
 
 	go func() {
 		defer wg.Done()
-		defer c.Close()
-		io.Copy(c, backendConn)
+		defer backendConn.Close() // Ensure backend connection is closed when copy finishes
+		// MODIFIED: Use the pooledCopy function.
+		pooledCopy(backendConn, c)
 	}()
 
 	go func() {
 		defer wg.Done()
-		defer backendConn.Close()
-		io.Copy(backendConn, c)
+		defer c.Close() // Ensure client connection is closed when copy finishes
+		// MODIFIED: Use the pooledCopy function.
+		pooledCopy(c, backendConn)
 	}()
 
 	wg.Wait()

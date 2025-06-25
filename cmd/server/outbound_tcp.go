@@ -1,9 +1,9 @@
 package main
 
 import (
-	"anytls/proxy"
 	"context"
 	"net"
+	"time"
 
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -13,8 +13,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// MODIFIED: Create a single instance of the custom dialer with DNS caching.
+// 5 seconds timeout for dialing, 10 minutes TTL for DNS cache entries.
+var cachedDialer = NewCustomDialer(5*time.Second, 10*time.Minute)
+
 func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr) error {
-	c, err := proxy.SystemDialer.DialContext(ctx, "tcp", destination.String())
+	// MODIFIED: Use the cachedDialer instead of proxy.SystemDialer.
+	c, err := cachedDialer.DialContext(ctx, "tcp", destination.String())
 	if err != nil {
 		logrus.Debugln("proxyOutboundTCP DialContext:", err)
 		err = E.Errors(err, N.ReportHandshakeFailure(conn, err))
