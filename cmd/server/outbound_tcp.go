@@ -13,9 +13,16 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// MODIFIED: Create a single instance of the custom dialer with DNS caching.
-// 5 seconds timeout for dialing, 10 minutes TTL for DNS cache entries.
-var cachedDialer = NewCustomDialer(5*time.Second, 10*time.Minute)
+// MODIFIED: The cachedDialer is now a package-level variable that will be
+// initialized once in main.go with the application's root context.
+var cachedDialer *CustomDialer
+
+// NewCachedDialer initializes the package-level cachedDialer.
+// This must be called once at startup.
+func NewCachedDialer(ctx context.Context) {
+	// 5 seconds timeout for dialing, 10 minutes TTL for DNS cache entries.
+	cachedDialer = NewCustomDialer(ctx, 5*time.Second, 10*time.Minute)
+}
 
 func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksaddr) error {
 	// MODIFIED: Use the cachedDialer instead of proxy.SystemDialer.
@@ -28,6 +35,7 @@ func proxyOutboundTCP(ctx context.Context, conn net.Conn, destination M.Socksadd
 
 	err = N.ReportHandshakeSuccess(conn)
 	if err != nil {
+		c.Close()
 		return err
 	}
 
@@ -50,6 +58,7 @@ func proxyOutboundUoT(ctx context.Context, conn net.Conn, destination M.Socksadd
 
 	err = N.ReportHandshakeSuccess(conn)
 	if err != nil {
+		c.Close()
 		return err
 	}
 

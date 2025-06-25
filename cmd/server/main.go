@@ -8,6 +8,9 @@ import (
 	"crypto/tls"
 	"io"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -61,10 +64,18 @@ func main() {
 
 	logrus.Infoln("[Server]", util.ProgramVersionName)
 	logrus.Infoln("[Server] Listening TCP on", config.Listen)
-	// MODIFIED: Check Fallback.Address
 	if config.Fallback.Address != "" {
 		logrus.Infoln("[Server] Fallback enabled, target:", config.Fallback.Address)
 	}
+
+	// 创建一个在接收到关闭信号时被取消的上下文
+	// 这是优雅停机机制的核心
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop() // 释放与NotifyContext相关的资源
+
+	// 初始化带缓存的拨号器，并传入根上下文
+	// 这确保了其清理goroutine能随应用生命周期结束
+	NewCachedDialer(ctx)
 
 	// 根据配置模式设置TLS
 	var tlsConfig *tls.Config
@@ -72,10 +83,16 @@ func main() {
 
 	switch config.TLS.Mode {
 	case "acme":
-		tlsConfig, err = setupACME(&config.TLS)
+		var acmeErrChan <-chan error
+		// 将可取消的上下文传递给setupACME，以便其自身进行优雅关闭
+		tlsConfig, acmeErrChan, err = setupACME(ctx, &config.TLS)
 		if err != nil {
 			logrus.Fatalln("Failed to setup ACME:", err)
 		}
+		if startupErr := <-acmeErrChan; startupErr != nil {
+			logrus.Fatalln("ACME challenge server failed to start, cannot continue:", startupErr)
+		}
+		logrus.Infoln("[ACME] HTTP challenge server started successfully.")
 	case "file":
 		cert, err := tls.LoadX509KeyPair(config.TLS.CertFile, config.TLS.KeyFile)
 		if err != nil {
@@ -104,19 +121,64 @@ func main() {
 		logrus.Fatalln("Listen server tcp:", err)
 	}
 
-	ctx := context.Background()
-	// MODIFIED: Pass the whole Fallback config struct to the server instance
+	// 创建一个WaitGroup来追踪活跃的连接
+	var wg sync.WaitGroup
 	server := NewMyServer(tlsConfig, config.Fallback)
 
-	logrus.Infoln("[Server] Service started successfully.")
-	for {
-		c, err := listener.Accept()
-		if err != nil {
-			logrus.Errorln("Accept error:", err)
-			continue
+	// 在goroutine中启动主服务循环，以便主线程可以阻塞并等待关闭信号
+	go func() {
+		logrus.Infoln("[Server] Service started successfully. Ready to accept connections.")
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				// 检查错误是否是由于在关闭期间关闭了监听器
+				select {
+				case <-ctx.Done():
+					// 这是关闭期间的预期错误，直接返回
+					return
+				default:
+					// 这是意外错误
+					logrus.Errorln("Accept error:", err)
+				}
+				continue
+			}
+
+			// 为每个新连接增加WaitGroup计数
+			wg.Add(1)
+			go func() {
+				// 当连接处理器返回时，减少计数器
+				defer wg.Done()
+				// 将可取消的上下文传递给处理器
+				handleTcpConnection(ctx, c, server)
+			}()
 		}
-		// The connection from tls.Listen is already a TLS connection.
-		// We can pass it directly to the handler.
-		go handleTcpConnection(ctx, c, server)
+	}()
+
+	// 阻塞直到接收到关闭信号
+	<-ctx.Done()
+
+	// --- 开始优雅停机 ---
+	logrus.Infoln("[Server] Shutdown signal received. Starting graceful shutdown...")
+
+	// 停止监听器接受新连接
+	// 这将导致服务循环的goroutine退出
+	if err := listener.Close(); err != nil {
+		logrus.Errorf("[Server] Error closing listener: %v", err)
 	}
+
+	// 等待所有活跃连接完成，并设置超时
+	shutdownComplete := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(shutdownComplete)
+	}()
+
+	select {
+	case <-shutdownComplete:
+		logrus.Infoln("[Server] All connections have been closed gracefully.")
+	case <-time.After(15 * time.Second): // 15秒超时
+		logrus.Warnln("[Server] Graceful shutdown timed out after 15 seconds. Forcing exit.")
+	}
+
+	logrus.Infoln("[Server] Shutdown complete.")
 }

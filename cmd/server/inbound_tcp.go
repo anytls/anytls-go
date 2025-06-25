@@ -20,24 +20,22 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// MODIFIED: Create a buffer pool specifically for io.Copy operations in fallback.
+// MODIFIED: Define initial read timeout as a constant.
+const initialReadTimeout = 5 * time.Second
+
 var copyBufPool = sync.Pool{
 	New: func() interface{} {
-		// Allocate a 32KB buffer, same as the default in io.Copy.
 		b := make([]byte, 32*1024)
 		return &b
 	},
 }
 
-// MODIFIED: A custom io.Copy implementation that uses a pooled buffer.
 func pooledCopy(dst io.Writer, src io.Reader) (written int64, err error) {
 	bufPtr := copyBufPool.Get().(*[]byte)
 	defer copyBufPool.Put(bufPtr)
-
 	return io.CopyBuffer(dst, src, *bufPtr)
 }
 
-// handleTcpConnection 处理一个已经建立的TLS连接。
 func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -46,16 +44,36 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	}()
 	defer c.Close()
 
+	// MODIFIED: Make the initial read respect the context for faster shutdown.
+	// This is done by racing the read operation with a context watcher.
+	var n int
+	var err error
+	readDone := make(chan struct{})
 	b := buf.NewPacket()
 	defer b.Release()
 
-	// 为初始认证包设置读取超时
-	c.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := b.ReadOnceFrom(c)
-	c.SetReadDeadline(time.Time{}) // 清除超时
+	go func() {
+		c.SetReadDeadline(time.Now().Add(initialReadTimeout))
+		n, err = b.ReadOnceFrom(c)
+		close(readDone)
+	}()
+
+	select {
+	case <-readDone:
+		// Read completed or timed out.
+	case <-ctx.Done():
+		// Shutdown was signaled. Force the read to unblock.
+		c.SetReadDeadline(time.Now())
+		<-readDone // Wait for the read goroutine to exit.
+		err = ctx.Err()
+	}
+
+	c.SetReadDeadline(time.Time{}) // Clear deadline
 	if err != nil {
 		logrus.Debugln("ReadOnceFrom:", err, "from", c.RemoteAddr())
-		fallback(ctx, c, s.fallbackCfg)
+		if n > 0 { // If some data was read before error, try to fallback
+			fallback(ctx, bufio.NewCachedConn(c, b), s.fallbackCfg)
+		}
 		return
 	}
 	cachedConn := bufio.NewCachedConn(c, b)
@@ -85,8 +103,6 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 
 	logrus.Infoln("Client authenticated:", c.RemoteAddr())
 
-	// 认证成功，创建会话
-	// MODIFIED: The session now handles its own read/write loops internally.
 	session := session.NewServerSession(cachedConn, func(stream *session.Stream) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -130,16 +146,31 @@ func fallback(ctx context.Context, c net.Conn, fallbackCfg FallbackConfig) {
 		return
 	}
 
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	if port == "443" {
-		logrus.Debugln("Fallback target port is 443, dialing with TLS.")
-		tlsConfig := &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: fallbackCfg.InsecureSkipVerify,
+		logrus.Debugln("Fallback target port is 443, dialing with TLS using cached dialer.")
+		rawConn, dialErr := cachedDialer.DialContext(dialCtx, "tcp", fallbackCfg.Address)
+		if dialErr != nil {
+			err = dialErr
+		} else {
+			tlsConfig := &tls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: fallbackCfg.InsecureSkipVerify,
+			}
+			tlsConn := tls.Client(rawConn, tlsConfig)
+			handshakeErr := tlsConn.HandshakeContext(dialCtx)
+			if handshakeErr != nil {
+				err = handshakeErr
+				rawConn.Close()
+			} else {
+				backendConn = tlsConn
+			}
 		}
-		backendConn, err = tls.Dial("tcp", fallbackCfg.Address, tlsConfig)
 	} else {
-		logrus.Debugln("Fallback target port is not 443, dialing with plain TCP.")
-		backendConn, err = net.Dial("tcp", fallbackCfg.Address)
+		logrus.Debugln("Fallback target port is not 443, dialing with plain TCP using cached dialer.")
+		backendConn, err = cachedDialer.DialContext(dialCtx, "tcp", fallbackCfg.Address)
 	}
 
 	if err != nil {
@@ -153,15 +184,13 @@ func fallback(ctx context.Context, c net.Conn, fallbackCfg FallbackConfig) {
 
 	go func() {
 		defer wg.Done()
-		defer backendConn.Close() // Ensure backend connection is closed when copy finishes
-		// MODIFIED: Use the pooledCopy function.
+		defer backendConn.Close()
 		pooledCopy(backendConn, c)
 	}()
 
 	go func() {
 		defer wg.Done()
-		defer c.Close() // Ensure client connection is closed when copy finishes
-		// MODIFIED: Use the pooledCopy function.
+		defer c.Close()
 		pooledCopy(c, backendConn)
 	}()
 

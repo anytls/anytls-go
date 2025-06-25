@@ -24,7 +24,8 @@ type DNSResolver struct {
 }
 
 // NewDNSResolver creates a new DNS resolver with an in-memory cache.
-func NewDNSResolver(ttl time.Duration) *DNSResolver {
+// MODIFIED: It now accepts a context to allow for graceful shutdown of its cleanup goroutine.
+func NewDNSResolver(ctx context.Context, ttl time.Duration) *DNSResolver {
 	resolver := &DNSResolver{
 		cache: make(map[string]*resolverCacheEntry),
 		ttl:   ttl,
@@ -33,7 +34,8 @@ func NewDNSResolver(ttl time.Duration) *DNSResolver {
 		},
 	}
 	// Start a background goroutine to periodically clean up expired entries.
-	go resolver.cleanupLoop(time.Minute)
+	// This goroutine will now stop when the provided context is canceled.
+	go resolver.cleanupLoop(ctx, time.Minute)
 	return resolver
 }
 
@@ -72,19 +74,26 @@ func (r *DNSResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAd
 }
 
 // cleanupLoop periodically iterates through the cache and removes expired entries.
-func (r *DNSResolver) cleanupLoop(interval time.Duration) {
+// MODIFIED: It now respects the context's done channel for graceful shutdown.
+func (r *DNSResolver) cleanupLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		r.mu.Lock()
-		now := time.Now()
-		for host, entry := range r.cache {
-			if now.After(entry.expiration) {
-				delete(r.cache, host)
+	for {
+		select {
+		case <-ticker.C:
+			r.mu.Lock()
+			now := time.Now()
+			for host, entry := range r.cache {
+				if now.After(entry.expiration) {
+					delete(r.cache, host)
+				}
 			}
+			r.mu.Unlock()
+		case <-ctx.Done():
+			logrus.Debugln("[DNS Cache] Cleanup loop shutting down.")
+			return
 		}
-		r.mu.Unlock()
 	}
 }
 
@@ -95,8 +104,9 @@ type CustomDialer struct {
 }
 
 // NewCustomDialer creates a new dialer with DNS caching capabilities.
-func NewCustomDialer(timeout time.Duration, dnsTTL time.Duration) *CustomDialer {
-	resolver := NewDNSResolver(dnsTTL)
+// MODIFIED: It now accepts a context to pass to the DNSResolver.
+func NewCustomDialer(ctx context.Context, timeout time.Duration, dnsTTL time.Duration) *CustomDialer {
+	resolver := NewDNSResolver(ctx, dnsTTL)
 	return &CustomDialer{
 		dialer: &net.Dialer{
 			Timeout: timeout,
