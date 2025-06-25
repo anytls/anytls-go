@@ -64,21 +64,23 @@ func (s *Stream) Close() error {
 }
 
 func (s *Stream) CloseWithError(err error) error {
-	// if err != io.ErrClosedPipe {
-	// 	logrus.Debugln(err)
-	// }
 	var once bool
 	s.dieOnce.Do(func() {
 		s.dieErr = err
 		s.pipeR.Close()
 		once = true
 	})
+
 	if once {
 		if s.dieHook != nil {
 			s.dieHook()
 			s.dieHook = nil
 		}
-		return s.sess.streamClosed(s.id)
+		// CORRECTED: Call streamClosed without expecting a return value.
+		// The close operation is now asynchronous. Return nil to indicate
+		// the close operation was successfully initiated.
+		s.sess.streamClosed(s.id)
+		return nil
 	} else {
 		return s.dieErr
 	}
