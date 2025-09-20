@@ -52,9 +52,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		return 0, os.ErrDeadlineExceeded
 	default:
 	}
-	f := newFrame(cmdPSH, s.id)
-	f.data = b
-	n, err = s.sess.writeFrame(f)
+	n, err = s.sess.writeDataFrame(s.id, b)
 	return
 }
 
@@ -127,7 +125,7 @@ func (s *Stream) HandshakeFailure(err error) error {
 	if once && err != nil && s.sess.peerVersion >= 2 {
 		f := newFrame(cmdSYNACK, s.id)
 		f.data = []byte(err.Error())
-		if _, err := s.sess.writeFrame(f); err != nil {
+		if _, err := s.sess.writeControlFrame(f); err != nil {
 			return err
 		}
 	}
@@ -141,7 +139,7 @@ func (s *Stream) HandshakeSuccess() error {
 		once = true
 	})
 	if once && s.sess.peerVersion >= 2 {
-		if _, err := s.sess.writeFrame(newFrame(cmdSYNACK, s.id)); err != nil {
+		if _, err := s.sess.writeControlFrame(newFrame(cmdSYNACK, s.id)); err != nil {
 			return err
 		}
 	}
