@@ -121,7 +121,7 @@ func (s *Session) Close() error {
 		}
 		s.streamLock.Lock()
 		for _, stream := range s.streams {
-			stream.Close()
+			stream.closeLocally()
 		}
 		s.streams = make(map[uint32]*Stream)
 		s.streamLock.Unlock()
@@ -243,16 +243,17 @@ func (s *Session) recvLoop() error {
 					stream, ok := s.streams[sid]
 					s.streamLock.RUnlock()
 					if ok {
-						stream.CloseWithError(fmt.Errorf("remote: %s", string(buffer)))
+						stream.closeWithError(fmt.Errorf("remote: %s", string(buffer)))
 					}
 					buf.Put(buffer)
 				}
 			case cmdFIN:
-				s.streamLock.RLock()
+				s.streamLock.Lock()
 				stream, ok := s.streams[sid]
-				s.streamLock.RUnlock()
+				delete(s.streams, sid)
+				s.streamLock.Unlock()
 				if ok {
-					stream.Close()
+					stream.closeLocally()
 				}
 				//logrus.Debugln("stream fin", sid, s.streams)
 			case cmdWaste:

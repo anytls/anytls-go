@@ -52,19 +52,27 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		return 0, os.ErrDeadlineExceeded
 	default:
 	}
+	if s.dieErr != nil {
+		return 0, s.dieErr
+	}
 	n, err = s.sess.writeDataFrame(s.id, b)
 	return
 }
 
 // Close implements net.Conn
 func (s *Stream) Close() error {
-	return s.CloseWithError(io.ErrClosedPipe)
+	return s.closeWithError(io.ErrClosedPipe)
 }
 
-func (s *Stream) CloseWithError(err error) error {
-	// if err != io.ErrClosedPipe {
-	// 	logrus.Debugln(err)
-	// }
+// closeLocally only closes Stream and don't call Session or dieHook
+func (s *Stream) closeLocally() {
+	s.dieOnce.Do(func() {
+		s.dieErr = net.ErrClosed
+		s.pipeR.Close()
+	})
+}
+
+func (s *Stream) closeWithError(err error) error {
 	var once bool
 	s.dieOnce.Do(func() {
 		s.dieErr = err
