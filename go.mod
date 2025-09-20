@@ -1,6 +1,6 @@
 module anytls
 
-go 1.23.6
+go 1.24.0
 
 require (
 	github.com/chen3feng/stl4go v0.1.1
