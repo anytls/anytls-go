@@ -34,13 +34,13 @@
 
 https://github.com/SagerNet/sing-box
 
-已合并至 dev-next 分支。它包含了 anytls 协议的服务器和客户端。
+它包含了 anytls 协议的服务器和客户端。
 
 ### mihomo
 
 https://github.com/MetaCubeX/mihomo
 
-已合并至 Alpha 分支。它包含了 anytls 协议的服务器和客户端。
+它包含了 anytls 协议的服务器和客户端。
 
 ### Shadowrocket
 
