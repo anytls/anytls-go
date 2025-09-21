@@ -64,12 +64,20 @@ func (s *Stream) Close() error {
 	return s.closeWithError(io.ErrClosedPipe)
 }
 
-// closeLocally only closes Stream and don't call Session or dieHook
+// closeLocally only closes Stream and don't notify remote peer
 func (s *Stream) closeLocally() {
+	var once bool
 	s.dieOnce.Do(func() {
 		s.dieErr = net.ErrClosed
 		s.pipeR.Close()
+		once = true
 	})
+	if once {
+		if s.dieHook != nil {
+			s.dieHook()
+			s.dieHook = nil
+		}
+	}
 }
 
 func (s *Stream) closeWithError(err error) error {
