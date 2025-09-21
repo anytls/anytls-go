@@ -10,6 +10,8 @@
 
 网络速度与线路质量有关，升级更优质的线路可以提升速度。
 
+请勿与 Hysteria 这类 udp/quic 协议做对比，因为它们底层的拥塞控制以及运营商侧应用的 QoS 策略不一样，完全没有可比性。
+
 ## 为什么选项这么少 / 为什么是自签证书
 
 本项目只是提供一个简洁的 Any in TLS 代理的示例，并不旨在成为“通用代理工具”。
@@ -63,13 +65,13 @@ stop=3
 
 ## 参考过的项目
 
-https://github.com/xtaci/smux
+https://github.com/xtaci/smux （会话层与复用实现）
 
-https://github.com/3andne/restls
+https://github.com/3andne/restls （PaddingScheme）
 
-https://github.com/SagerNet/sing-box
+https://github.com/SagerNet/sing-box （代理框架）
 
-https://github.com/klzgrad/naiveproxy
+https://github.com/klzgrad/naiveproxy （流量形态与流量分类调研）
 
 ## 已知弱点
 

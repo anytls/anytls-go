@@ -37,7 +37,7 @@ func main() {
 	passwordSha256 = sum[:]
 
 	logrus.Infoln("[Client]", util.ProgramVersionName)
-	logrus.Infoln("[Client] socks5", *listen, "=>", *serverAddr)
+	logrus.Infoln("[Client] socks5/http", *listen, "=>", *serverAddr)
 
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
