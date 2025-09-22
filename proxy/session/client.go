@@ -98,10 +98,16 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 			if clientDebugSessionPool {
 				logrus.Infoln("put session:", session.seq, stream.id)
 			}
-			c.idleSessionLock.Lock()
-			session.idleSince = time.Now()
-			c.idleSession.Insert(math.MaxUint64-session.seq, session)
-			c.idleSessionLock.Unlock()
+			select {
+			case <-c.die.Done():
+				// Now client has been closed
+				go session.Close()
+			default:
+				c.idleSessionLock.Lock()
+				session.idleSince = time.Now()
+				c.idleSession.Insert(math.MaxUint64-session.seq, session)
+				c.idleSessionLock.Unlock()
+			}
 		} else {
 			if clientDebugSessionPool {
 				logrus.Infoln("discard session stream:", session.seq, stream.id)
