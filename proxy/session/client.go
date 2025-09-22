@@ -8,12 +8,16 @@ import (
 	"io"
 	"math"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/chen3feng/stl4go"
 	"github.com/sagernet/sing/common/atomic"
+	"github.com/sirupsen/logrus"
 )
+
+var clientDebugSessionPool = os.Getenv("CLIENT_DEBUG_SESSION_POOL") == "1"
 
 type Client struct {
 	die       context.Context
@@ -71,6 +75,13 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 	session = c.getIdleSession()
 	if session == nil {
 		session, err = c.createSession(ctx)
+		if session != nil && clientDebugSessionPool {
+			logrus.Infoln("create session:", session.seq)
+		}
+	} else {
+		if clientDebugSessionPool {
+			logrus.Infoln("get session:", session.seq)
+		}
 	}
 	if session == nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
@@ -84,10 +95,17 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 	stream.dieHook = func() {
 		// If Session is not closed, put this Stream to pool
 		if !session.IsClosed() {
+			if clientDebugSessionPool {
+				logrus.Infoln("put session:", session.seq, stream.id)
+			}
 			c.idleSessionLock.Lock()
 			session.idleSince = time.Now()
 			c.idleSession.Insert(math.MaxUint64-session.seq, session)
 			c.idleSessionLock.Unlock()
+		} else {
+			if clientDebugSessionPool {
+				logrus.Infoln("discard session stream:", session.seq, stream.id)
+			}
 		}
 	}
 
@@ -114,7 +132,10 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 	session := NewClientSession(underlying, &padding.DefaultPaddingFactory)
 	session.seq = c.sessionCounter.Add(1)
 	session.dieHook = func() {
-		//logrus.Debugln("session died", session)
+		if clientDebugSessionPool {
+			logrus.Infoln("session died:", session.seq, session.streamId.Load(), session.pktCounter.Load())
+		}
+
 		c.idleSessionLock.Lock()
 		c.idleSession.Remove(math.MaxUint64 - session.seq)
 		c.idleSessionLock.Unlock()
@@ -165,6 +186,10 @@ func (c *Client) idleCleanupExpTime(expTime time.Time) {
 		key := it.Key()
 		it.MoveToNext()
 
+		if clientDebugSessionPool {
+			logrus.Debugln("check session:", session.seq, expTime, session.idleSince)
+		}
+
 		if !session.idleSince.Before(expTime) {
 			activeCount++
 			continue
@@ -182,6 +207,9 @@ func (c *Client) idleCleanupExpTime(expTime time.Time) {
 	c.idleSessionLock.Unlock()
 
 	for _, session := range sessionToClose {
+		if clientDebugSessionPool {
+			logrus.Infoln("local cleanup session:", session.seq)
+		}
 		session.Close()
 	}
 }
