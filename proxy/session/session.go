@@ -4,9 +4,11 @@ import (
 	"anytls/proxy/padding"
 	"anytls/util"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"runtime/debug"
@@ -50,6 +52,7 @@ type Session struct {
 	buffering   bool
 	buffer      []byte
 	pktCounter  atomic.Uint32
+	prevLen     int // New: Track previous packet length for script engine
 
 	// server
 	onNewStream func(stream *Stream)
@@ -72,6 +75,7 @@ func NewServerSession(conn net.Conn, onNewStream func(stream *Stream), _padding 
 		conn:        conn,
 		onNewStream: onNewStream,
 		padding:     _padding,
+		sendPadding: true, // Enable server-side padding
 	}
 	s.die = make(chan struct{})
 	s.streams = make(map[uint32]*Stream)
@@ -140,8 +144,6 @@ func (s *Session) OpenStream() (*Stream, error) {
 	sid := s.streamId.Add(1)
 	stream := newStream(sid, s)
 
-	//logrus.Debugln("stream open", sid, s.streams)
-
 	if sid >= 2 && s.peerVersion >= 2 {
 		s.synDoneLock.Lock()
 		if s.synDone != nil {
@@ -205,7 +207,7 @@ func (s *Session) recvLoop() error {
 						return err
 					}
 				}
-			case cmdSYN: // should be server only
+			case cmdSYN:
 				if !s.isClient && !receivedSettingsFromClient {
 					f := newFrame(cmdAlert, 0)
 					f.data = []byte("client did not send its settings")
@@ -225,7 +227,7 @@ func (s *Session) recvLoop() error {
 					}()
 				}
 				s.streamLock.Unlock()
-			case cmdSYNACK: // should be client only
+			case cmdSYNACK:
 				s.synDoneLock.Lock()
 				if s.synDone != nil {
 					s.synDone()
@@ -238,7 +240,6 @@ func (s *Session) recvLoop() error {
 						buf.Put(buffer)
 						return err
 					}
-					// report error
 					s.streamLock.RLock()
 					stream, ok := s.streams[sid]
 					s.streamLock.RUnlock()
@@ -255,7 +256,6 @@ func (s *Session) recvLoop() error {
 				if ok {
 					stream.closeLocally()
 				}
-				//logrus.Debugln("stream fin", sid, s.streams)
 			case cmdWaste:
 				if hdr.Length() > 0 {
 					buffer := buf.Get(int(hdr.Length()))
@@ -277,7 +277,6 @@ func (s *Session) recvLoop() error {
 						m := util.StringMapFromBytes(buffer)
 						paddingF := s.padding.Load()
 						if m["padding-md5"] != paddingF.Md5 {
-							// logrus.Debugln("remote md5 is", m["padding-md5"])
 							f := newFrame(cmdUpdatePaddingScheme, 0)
 							f.data = paddingF.RawScheme
 							_, err = s.writeControlFrame(f)
@@ -286,14 +285,10 @@ func (s *Session) recvLoop() error {
 								return err
 							}
 						}
-						// check client's version
 						if v, err := strconv.Atoi(m["v"]); err == nil && v >= 2 {
 							s.peerVersion = byte(v)
-							// send cmdServerSettings
 							f := newFrame(cmdServerSettings, 0)
-							f.data = util.StringMap{
-								"v": "2",
-							}.ToBytes()
+							f.data = util.StringMap{"v": "2"}.ToBytes()
 							_, err = s.writeControlFrame(f)
 							if err != nil {
 								buf.Put(buffer)
@@ -318,7 +313,6 @@ func (s *Session) recvLoop() error {
 				}
 			case cmdUpdatePaddingScheme:
 				if hdr.Length() > 0 {
-					// `rawScheme` Do not use buffer to prevent subsequent misuse
 					rawScheme := make([]byte, int(hdr.Length()))
 					if _, err := io.ReadFull(s.conn, rawScheme); err != nil {
 						return err
@@ -336,7 +330,6 @@ func (s *Session) recvLoop() error {
 					return err
 				}
 			case cmdHeartResponse:
-				// Active keepalive checking is not implemented yet
 				break
 			case cmdServerSettings:
 				if hdr.Length() > 0 {
@@ -346,7 +339,6 @@ func (s *Session) recvLoop() error {
 						return err
 					}
 					if s.isClient {
-						// check server's version
 						m := util.StringMapFromBytes(buffer)
 						if v, err := strconv.Atoi(m["v"]); err == nil {
 							s.peerVersion = byte(v)
@@ -355,7 +347,6 @@ func (s *Session) recvLoop() error {
 					buf.Put(buffer)
 				}
 			default:
-				// I don't know what command it is (can't have data)
 			}
 		} else {
 			return err
@@ -426,67 +417,111 @@ func (s *Session) writeConn(b []byte) (n int, err error) {
 		s.buffer = nil
 	}
 
-	// calulate & send padding
+	// Update previous packet length for state machine
+	// Note: We use the length of the packet we are about to write as 'prev' for the NEXT iteration.
+	// But the logic requires using the 'prev' value that was stored from the LAST iteration.
+	// So we capture the current length at the end of the function.
+
+	currentLen := len(b)
+
+	// Execute Script / Legacy Actions
 	if s.sendPadding {
 		pkt := s.pktCounter.Add(1)
 		paddingF := s.padding.Load()
 		if pkt < paddingF.Stop {
-			pktSizes := paddingF.GenerateRecordPayloadSizes(pkt)
-			for _, l := range pktSizes {
-				remainPayloadLen := len(b)
-				if l == padding.CheckMark {
-					if remainPayloadLen == 0 {
-						break
+			// Generate list of actions (Delay, Pad, etc.) based on current packet ID and previous length
+			actions := paddingF.GenerateActions(pkt, s.prevLen)
+
+			for _, act := range actions {
+				switch act.Type {
+				case padding.ActionDelay:
+					// Execute Delay
+					delay := getRandomDuration(act.Min, act.Max)
+					if delay > 0 {
+						time.Sleep(delay)
+					}
+
+				case padding.ActionPad:
+					// Execute Padding (Logic similar to original)
+					l := int(act.Min)
+					if act.Max > act.Min {
+						r, _ := rand.Int(rand.Reader, big.NewInt(act.Max-act.Min))
+						l += int(r.Int64())
+					} else if act.Min == int64(padding.CheckMark) {
+						l = padding.CheckMark
+					}
+
+					remainPayloadLen := len(b)
+					if l == padding.CheckMark {
+						if remainPayloadLen == 0 {
+							break // Break only the inner loop? Logic implies we stop processing this packet's rules?
+							// Original logic: "if checkmark and no payload, stop padding for this Write"
+						} else {
+							continue
+						}
+					}
+
+					if remainPayloadLen > l {
+						// Payload is larger than pad size, split it
+						_, err = s.conn.Write(b[:l])
+						if err != nil {
+							return 0, err
+						}
+						n += l
+						b = b[l:]
+					} else if remainPayloadLen > 0 {
+						// Payload fits, but needs padding
+						paddingLen := l - remainPayloadLen - headerOverHeadSize
+						if paddingLen > 0 {
+							pad := make([]byte, headerOverHeadSize+paddingLen)
+							pad[0] = cmdWaste
+							binary.BigEndian.PutUint32(pad[1:5], 0)
+							binary.BigEndian.PutUint16(pad[5:7], uint16(paddingLen))
+							b = slices.Concat(b, pad)
+						}
+						_, err = s.conn.Write(b)
+						if err != nil {
+							return 0, err
+						}
+						n += remainPayloadLen
+						b = nil
 					} else {
-						continue
+						// Only padding
+						pad := make([]byte, headerOverHeadSize+l)
+						pad[0] = cmdWaste
+						binary.BigEndian.PutUint32(pad[1:5], 0)
+						binary.BigEndian.PutUint16(pad[5:7], uint16(l))
+						_, err = s.conn.Write(pad)
+						if err != nil {
+							return 0, err
+						}
+						b = nil
 					}
-				}
-				// logrus.Debugln(pkt, "write", l, "len", remainPayloadLen, "remain", remainPayloadLen-l)
-				if remainPayloadLen > l { // this packet is all payload
-					_, err = s.conn.Write(b[:l])
-					if err != nil {
-						return 0, err
-					}
-					n += l
-					b = b[l:]
-				} else if remainPayloadLen > 0 { // this packet contains padding and the last part of payload
-					paddingLen := l - remainPayloadLen - headerOverHeadSize
-					if paddingLen > 0 {
-						padding := make([]byte, headerOverHeadSize+paddingLen)
-						padding[0] = cmdWaste
-						binary.BigEndian.PutUint32(padding[1:5], 0)
-						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
-						b = slices.Concat(b, padding)
-					}
-					_, err = s.conn.Write(b)
-					if err != nil {
-						return 0, err
-					}
-					n += remainPayloadLen
-					b = nil
-				} else { // this packet is all padding
-					padding := make([]byte, headerOverHeadSize+l)
-					padding[0] = cmdWaste
-					binary.BigEndian.PutUint32(padding[1:5], 0)
-					binary.BigEndian.PutUint16(padding[5:7], uint16(l))
-					_, err = s.conn.Write(padding)
-					if err != nil {
-						return 0, err
-					}
-					b = nil
 				}
 			}
-			// maybe still remain payload to write
-			if len(b) == 0 {
-				return
-			} else {
+
+			// Write any remaining payload
+			if len(b) > 0 {
 				n2, err := s.conn.Write(b)
+				s.prevLen = currentLen // Update state
 				return n + n2, err
 			}
+			s.prevLen = currentLen // Update state
+			return n, nil
+
 		} else {
 			s.sendPadding = false
 		}
 	}
 
+	s.prevLen = currentLen // Update state for next packet
 	return s.conn.Write(b)
+}
+
+func getRandomDuration(min, max int64) time.Duration {
+	if max <= min {
+		return time.Duration(min) * time.Millisecond
+	}
+	i, _ := rand.Int(rand.Reader, big.NewInt(max-min))
+	return time.Duration(i.Int64()+min) * time.Millisecond
 }
