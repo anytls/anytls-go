@@ -21,6 +21,7 @@ func main() {
 	listen := flag.String("l", "0.0.0.0:8443", "server listen port")
 	password := flag.String("p", "", "password")
 	paddingScheme := flag.String("padding-scheme", "", "padding-scheme")
+	fallback := flag.String("fallback", "", "fallback address (host:port)")
 	flag.Parse()
 
 	if *password == "" {
@@ -68,7 +69,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	server := NewMyServer(tlsConfig)
+	server := NewMyServer(tlsConfig, *fallback)
 
 	for {
 		c, err := listener.Accept()
