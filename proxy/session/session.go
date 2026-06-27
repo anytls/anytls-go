@@ -111,6 +111,7 @@ func (s *Session) IsClosed() bool {
 func (s *Session) Close() error {
 	var once bool
 	s.dieOnce.Do(func() {
+		_ = s.conn.SetDeadline(time.Now())
 		close(s.die)
 		once = true
 	})

@@ -23,6 +23,7 @@ func main() {
 	sni := flag.String("sni", "", "Server Name Indication")
 	password := flag.String("p", "", "Password")
 	minIdleSession := flag.Int("m", 5, "Reserved min idle session")
+	disableReuse := flag.Bool("dr", false, "Disable client session reuse")
 	flag.Parse()
 
 	if serverURL, err := url.Parse(*serverAddr); err == nil {
@@ -91,7 +92,7 @@ func main() {
 		}
 		conn = tls.Client(conn, tlsConfig)
 		return conn, nil
-	}, *minIdleSession)
+	}, *minIdleSession, *disableReuse)
 
 	for {
 		c, err := listener.Accept()
