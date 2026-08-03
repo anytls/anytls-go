@@ -89,8 +89,10 @@ padding-md5=(md5)
 > 采用 UTF-8 编码，key 与 value 之间用 `=` 连接，两者均为 string 类型。不同项目之间用 `\n` 分割。
 
 - `v` 是客户端实现的协议版本号 （目前为 `2`）
-- `client` 是客户端软件名称与版本号（第三方实现请填写真实的软件名称与版本号，伪装没有任何意义）
+- `client` 是客户端软件名称与版本号（第三方实现请填写真实的软件名称与版本号）
 - `padding-md5` 是客户端当前 `paddingScheme` 的 md5 （小写 hex 编码）
+
+关于 `client` 字段的设计，请看这篇[文档](./client-name.md)。
 
 #### cmdServerSettings
 
