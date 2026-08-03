@@ -5,12 +5,14 @@ import (
 )
 
 type myServer struct {
-	tlsConfig *tls.Config
+	tlsConfig    *tls.Config
+	fallbackAddr string
 }
 
-func NewMyServer(tlsConfig *tls.Config) *myServer {
+func NewMyServer(tlsConfig *tls.Config, fallbackAddr string) *myServer {
 	s := &myServer{
-		tlsConfig: tlsConfig,
+		tlsConfig:    tlsConfig,
+		fallbackAddr: fallbackAddr,
 	}
 	return s
 }

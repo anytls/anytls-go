@@ -40,13 +40,13 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	by, err := b.ReadBytes(32)
 	if err != nil || !bytes.Equal(by, passwordSha256) {
 		b.Resize(0, n)
-		fallback(ctx, c)
+		fallback(ctx, c, s.fallbackAddr)
 		return
 	}
 	by, err = b.ReadBytes(2)
 	if err != nil {
 		b.Resize(0, n)
-		fallback(ctx, c)
+		fallback(ctx, c, s.fallbackAddr)
 		return
 	}
 	paddingLen := binary.BigEndian.Uint16(by)
@@ -54,7 +54,7 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 		_, err = b.ReadBytes(int(paddingLen))
 		if err != nil {
 			b.Resize(0, n)
-			fallback(ctx, c)
+			fallback(ctx, c, s.fallbackAddr)
 			return
 		}
 	}
@@ -83,7 +83,21 @@ func handleTcpConnection(ctx context.Context, c net.Conn, s *myServer) {
 	session.Close()
 }
 
-func fallback(ctx context.Context, c net.Conn) {
-	// 暂未实现
-	logrus.Debugln("fallback:", c.RemoteAddr())
+func fallback(ctx context.Context, c net.Conn, addr string) {
+	if addr == "" {
+		logrus.Debugln("fallback: no address configured", c.RemoteAddr())
+		return
+	}
+	logrus.Debugln("fallback to", addr, "from", c.RemoteAddr())
+
+	fc, err := net.Dial("tcp", addr)
+	if err != nil {
+		logrus.Errorln("fallback dial:", err)
+		return
+	}
+	defer fc.Close()
+
+	if err := bufio.CopyConn(ctx, c, fc); err != nil {
+		logrus.Debugln("fallback copy:", err)
+	}
 }
